@@ -1,169 +1,89 @@
-# Tejas Photography — Backend (Spring Boot + Neon PostgreSQL)
+Tejas Photography: Backend API
 
-REST API for the React website: **login / register, date availability, enquiries, admin dashboard, WhatsApp confirmation.**
-Java 17 · Spring Boot 3.5 · Spring Security (stateless JWT) · Spring Data JPA · Flyway · PostgreSQL (Neon).
+Spring Boot REST API for a photography booking system: customer and admin JWT auth, date enquiries with clash detection, admin dashboard data, and optional WhatsApp Cloud API confirmations.
 
-> **Honest note about Vercel:** Vercel cannot run a Java/Spring Boot server (its functions support Node, Python, Go, Ruby…).
-> So the setup is: **React site on Vercel (or Netlify) + this backend on Render/Railway/Koyeb (Docker) + database on Neon.**
-> All three have free tiers. Steps are in section 6.
->
-> **Not yet compiled:** the build sandbox this was written in could not download Maven dependencies, so `mvn test`
-> has **not been run**. Run `mvn test` once on your PC (section 5) — if anything fails, send me the error.
-> (Verified separately: the Neon URL parser, and the patched React `Contact.jsx` builds.)
+Frontend repository: Tejas_photography (React website and admin dashboard)
 
----------------------------------------------------------------------------------------------------
+Features
+Stateless JWT authentication with two roles: USER (customer) and ADMIN
+Admin account created automatically on first start from configuration
+Public enquiry submission and date availability check
+Admin endpoints to list, confirm and reject enquiries
+Booking rule: the number of confirmed bookings per day is configurable (MAX_CONFIRMED_PER_DAY)
+Optional automatic WhatsApp confirmation through the Meta Cloud API (off by default; the dashboard's WhatsApp button works without it)
+Flyway migrations, Swagger UI, CORS configured for the frontend
+Tech stack
 
-## 1. How the system works
+Java 17 · Spring Boot 3.5 · Spring Security (JWT) · Spring Data JPA / Hibernate · Flyway · PostgreSQL (production) / MySQL (local testing) · springdoc OpenAPI · Maven
 
-```
- Customer / Admin browser (React on Vercel)
-        │  HTTPS + JSON   (Authorization: Bearer <JWT> after login)
-        ▼
- Spring Boot API  (Render / Railway, Docker)
-   ├─ Spring Security filter chain: CORS → JWT filter → role rules
-   ├─ Controllers  ──►  Services  ──►  Repositories (JPA)
-   └─ WhatsAppService ──► Meta WhatsApp Cloud API   (optional)
-        │  JDBC over SSL
-        ▼
- Neon PostgreSQL   (tables: users, inquiries — created by Flyway)
-```
+API endpoints
 
-### Request flows
-**Register / login** — `POST /api/auth/register` stores the user with a **BCrypt** password hash and returns
-`{role, name, email, phone, token}` (exactly what the frontend keeps as `tp_session`). `POST /api/auth/login` takes
-`{role, email, password}`; the **User / Admin tab** is enforced: a customer cannot log in on the Admin tab and vice-versa.
-The token is a signed JWT (24 h, HS256) containing the user id and role.
+Base URL (local): http://localhost:8081 (or the port shown on startup)
 
-**Customer sends an enquiry** — the form calls `GET /api/dates/check?date=…` (shows *available / n enquiries / already
-booked*) and then `POST /api/inquiries`. This is public (no login needed). If the customer *is* logged in, the enquiry is
-linked to their account. The phone is normalised to `+91…`; past dates are rejected. Status starts as **`new`**.
+Method	Path	Auth	Purpose
+GET	/api/health	none	Health check
+POST	/api/auth/register	none	Customer sign-up
+POST	/api/auth/login	none	Login. Body has role (user or admin), email, password
+GET	/api/auth/me	token	Current user
+GET	/api/dates/check?date=YYYY-MM-DD	none	Enquiry count and whether the date is booked
+POST	/api/inquiries	none	Submit an enquiry
+GET	/api/inquiries/mine	token	The logged-in customer's enquiries
+GET	/api/inquiries	admin	All enquiries (dashboard)
+PATCH	/api/inquiries/{id}/status	admin	Set status: confirmed / rejected / new
 
-**Admin dashboard** — `GET /api/inquiries` (ADMIN only) lists everything newest-first; the UI groups by date and flags
-clashes. `PATCH /api/inquiries/{id}/status` with `{status:"confirmed"|"rejected"|"new"}`:
 
-1. Short DB transaction: the day's rows are locked (`SELECT … FOR UPDATE`); if the date already has
-   `MAX_CONFIRMED_PER_DAY` (default **1**) confirmed enquiries, the API answers **409 "This date is already booked"**
-   → no double booking, even with two admins clicking at once.
-2. Status saved.
-3. **After** the transaction, the WhatsApp message goes to the customer (Cloud API). The result
-   (`SENT / FAILED / DISABLED`) is saved on the enquiry. A WhatsApp failure **never** undoes the confirmation, and the
-   response always contains `whatsappLink` (a `wa.me` link) as a manual fallback — the dashboard's WhatsApp button.
 
-### API
-| Method & path | Who | Purpose |
-|---|---|---|
-| `POST /api/auth/register` | public | create customer account → session |
-| `POST /api/auth/login` | public | `{role,email,password}` → session |
-| `GET /api/auth/me` | logged in | current user |
-| `GET /api/dates/check?date=2026-12-24` | public | `{date,count,booked}` |
-| `POST /api/inquiries` | public | create enquiry |
-| `GET /api/inquiries/mine` | logged in | my enquiries |
-| `GET /api/inquiries` | **admin** | all enquiries |
-| `PATCH /api/inquiries/{id}/status` | **admin** | confirm / reject (+ WhatsApp) |
-| `GET /api/health` | public | health check (Render) |
-| `/swagger-ui.html` | public | interactive docs |
+How a request flows
+React site ──▶ JwtAuthenticationFilter ──▶ Controller ──▶ Service ──▶ Repository ──▶ Database
+                 (checks Bearer token)       (validation)   (booking rules)   (JPA)
+A customer submits POST /api/inquiries. The service validates it and stores it with status NEW.
+The admin logs in and receives a JWT, then calls GET /api/inquiries for the dashboard.
+Confirming a date (PATCH .../status) applies the per-day booking rule, updates the row and returns a WhatsApp link for the customer.
+Proof of working
 
-Errors are JSON `{status, error, message, path}`; the React app shows `message`.
+The API was tested end to end from the React frontend, with the backend running locally in STS. The console shows the Hibernate SQL for each request.
 
----------------------------------------------------------------------------------------------------
+Enquiry submitted from the website: the date-count query and insert into inquiries appear in the console. Enquiry form and backend console
 
-## 2. Database structure (Neon / PostgreSQL)
-Created automatically by Flyway from `src/main/resources/db/migration/V1__init.sql` (copy in `docs/schema.sql`).
-Hibernate runs with `ddl-auto=validate`, so it never changes the schema by itself.
+The stored enquiry appears on the admin dashboard: SQL logs on the left, dashboard on the right. Backend SQL logs and admin dashboard
 
-```
- users 1 ───────────< inquiries        (inquiries.user_id is NULL for anonymous visitors)
-```
+More screenshots of the full flow (clash detection, confirm / reject, WhatsApp button) are in the frontend README.
 
-**`users`**
-| column | type | notes |
-|---|---|---|
-| id | BIGINT identity PK | |
-| full_name | VARCHAR(100) | |
-| email | VARCHAR(150) | **UNIQUE** (stored lower-case) |
-| phone | VARCHAR(20) | `+919876543210` |
-| password | VARCHAR(255) | BCrypt hash |
-| role | VARCHAR(20) | `USER` \| `ADMIN` (CHECK) |
-| enabled | BOOLEAN | default true |
-| created_at | TIMESTAMPTZ | |
+Run locally
 
-**`inquiries`**
-| column | type | notes |
-|---|---|---|
-| id | BIGINT identity PK | |
-| user_id | BIGINT FK → users(id) | `ON DELETE SET NULL`, optional |
-| name / phone / email | VARCHAR | customer details |
-| event_date | DATE | requested date, optional |
-| service | VARCHAR(100) | e.g. "Wedding Photography" |
-| message | VARCHAR(2000) | |
-| status | VARCHAR(20) | `NEW` \| `CONFIRMED` \| `REJECTED` (CHECK) — API shows lower-case |
-| whatsapp_status | VARCHAR(20) | `NOT_SENT` \| `SENT` \| `FAILED` \| `DISABLED` |
-| whatsapp_message_id / whatsapp_error | VARCHAR | result of the Cloud API call |
-| created_at / updated_at / confirmed_at | TIMESTAMPTZ | |
+Prerequisites: JDK 17, Maven, a database (MySQL or PostgreSQL).
 
-Indexes: `(event_date, status)` (availability + clash checks), `user_id`, `created_at DESC`.
-The first **admin user is created automatically** on start from `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
+bash
+git clone https://github.com/CoderRushikesh/Tejas_photography_backend.git
+cd Tejas_photography_backend
 
-> You wrote "neo db" — I read it as **Neon** (serverless Postgres). If you meant **Neo4j** (graph database), tell me;
-> this data is relational so Postgres is the better fit.
+Create src/main/resources/application-local.properties (do not commit it) with your own values:
 
----------------------------------------------------------------------------------------------------
+properties
+spring.datasource.url=jdbc:mysql://localhost:3306/tejas_photography?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+spring.datasource.username=root
+spring.datasource.password=<your-db-password>
+spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver
 
-## 3. Project layout
-```
-src/main/java/com/tejas/photography
-  config/      AppProperties, DataSourceConfig + DatabaseUrl (Neon URL parser), AdminSeeder, OpenApiConfig
-  security/    SecurityConfig, JwtService, JwtAuthenticationFilter, UserPrincipal, JSON 401/403 handler
-  controller/  AuthController, InquiryController, HealthController
-  service/     AuthService, InquiryService (rules + locking), WhatsAppService
-  repository/  UserRepository, InquiryRepository
-  entity/ dto/ enums/ exception/ util/
-src/main/resources/ application.properties, db/migration/V1__init.sql
-frontend-integration/  Contact.jsx (wired to the API) + env example
-Dockerfile · render.yaml · .env.example
-```
+app.cors.allowed-origins=http://localhost:3000
+app.admin.email=<admin-email>
+app.admin.password=<admin-password>
+app.admin.name=Tejas
+app.admin.phone=<admin-phone>
+app.booking.max-confirmed-per-day=1
+app.whatsapp.enabled=false
 
-## 4. Configuration (environment variables)
-See `.env.example`. Required in production: `DATABASE_URL`, `JWT_SECRET` (32+ chars), `ADMIN_EMAIL`,
-`ADMIN_PASSWORD`, `CORS_ORIGINS` (wildcards allowed: `https://*.vercel.app`).
-Optional: `MAX_CONFIRMED_PER_DAY`, `WHATSAPP_*`.
+Run with the local profile:
 
-## 5. Run locally
-Needs Java 17 + Maven. Either point `DATABASE_URL` at your Neon database, or use local Postgres:
-```bash
-# option A: Neon
-export DATABASE_URL='postgresql://USER:PASS@ep-xxx.aws.neon.tech/neondb?sslmode=require'
-# option B: local Postgres with a database called tejas_photography (user postgres / password postgres)
+bash
+mvn spring-boot:run "-Dspring-boot.run.profiles=local"
 
-mvn test                 # runs the H2 integration tests + URL parser tests
-mvn spring-boot:run      # http://localhost:8080/swagger-ui.html
-```
-Admin login (default, change it!): `admin@tejasphotography.com` / `Admin@12345`.
-Point the React app at it: `REACT_APP_API_URL=http://localhost:8080 npm start`.
+The admin account is created on first start. The log shows Seeded admin account. Test with Swagger UI or Postman.
 
-## 6. Deploy free (Neon + Render + Vercel)
-1. **Neon** — neon.tech → create project → copy the connection string (`postgresql://…?sslmode=require`). Nothing else:
-   Flyway creates the tables on the first start.
-2. **Backend on Render** — push this folder to a GitHub repo → Render → *New → Blueprint* (uses `render.yaml`) or
-   *New → Web Service → Docker*. Set env vars: `DATABASE_URL`, `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `ADMIN_PHONE`,
-   `CORS_ORIGINS=https://<your-site>.vercel.app`. (`JWT_SECRET` is generated.) Health check path `/api/health`.
-   Railway / Koyeb / Fly.io work the same way with the Dockerfile. Free Render services sleep after ~15 min idle, so the
-   first request can take ~30–60 s; Neon also wakes in about a second.
-3. **Frontend on Vercel** — import the React repo; add env var `REACT_APP_API_URL=https://<render-service>.onrender.com`
-   (no trailing slash) and redeploy. (On Netlify: same variable, build `npm run build`, publish `build`.)
-   Replace `src/components/Contact.jsx` with `frontend-integration/Contact.jsx` — **your current repo's form only opens
-   WhatsApp and never calls the API**, so no enquiry would reach the dashboard without this change. The new form
-   reads the `prefill-inquiry` event from the *Book Date* buttons, shows live availability, and saves the enquiry.
-4. Remove the `DEMO_ADMIN` fallback in `api.js` when you go live (it only applies when `REACT_APP_API_URL` is empty).
+For PostgreSQL (the default, used with Neon in production) set DATABASE_URL and the other variables below, and run without the local profile.
 
-## 7. WhatsApp confirmation (optional, automatic)
-Without any setup, confirming still gives the dashboard's **WhatsApp** button (opens WhatsApp with the message).
-For automatic sending: create a Meta WhatsApp Business app → get `WHATSAPP_PHONE_NUMBER_ID` and a permanent token →
-create the template `booking_confirmed` (3 variables) with body
-`Hi {{1}}, your {{2}} on {{3}} with Tejas Photography is confirmed. We will contact you with the next steps.`
-→ set `WHATSAPP_ENABLED=true`. (`WHATSAPP_MODE=text` only delivers if the customer messaged you in the last 24 h.)
+Configuration (environment variables)
+Variable	Purpose
+DATABASE_URL / DB_URL, DB_USERNAME, DB_PASSWORD	Database connection
+JWT_SECRET	JWT signing key, at least 32 characters.
 
-## 8. Known limits
-* Not compiled/tested in the build sandbox (see top). Flyway SQL is Postgres-only; tests use H2 with Hibernate-created tables.
-* No email verification / password reset yet. Passwords: min 6 chars.
-* JWT lives in the browser's localStorage (as the existing frontend does); rotate `JWT_SECRET` to log everyone out.
